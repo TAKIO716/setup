@@ -3,7 +3,7 @@ const mineflayer = require('mineflayer');
 const fs = require('fs');
 
 const MQTT_URL = 'mqtt://broker.hivemq.com:1883';
-const PREFIX = 'farmkalwi_09812'; // SAMAKAN
+const PREFIX = 'farmkalwi_09812';
 const PHONE_ID = 'HP-' + Date.now().toString().slice(-4) + Math.floor(Math.random()*100);
 const TASK_FILE = './current_task.json';
 
@@ -15,7 +15,8 @@ const T_STATUS   = `${PREFIX}/agent/status`;
 let bot = null;
 let currentTask = null;
 let isConnecting = false;
-let whGranted = false;
+let whDone = false; // Flag: udah pernah dapet izin WH
+let lastWhRequest = 0;
 
 const BOT_CONFIG = {
     host: 'kalwi.id', port: 25565, version: '1.18.1',
@@ -40,9 +41,9 @@ function saveTask(t) {
 const log = (m) => console.log(`[${new Date().toISOString().slice(11, 19)}] [${PHONE_ID}] ${m}`);
 const client = mqtt.connect(MQTT_URL);
 
-// Timer minta tugas
+// Minta task tiap 5 detik kalau nganggur
 setInterval(() => {
-    if (!currentTask && client.connected) {
+    if (!currentTask && client.connected && !isConnecting) {
         client.publish(T_REQ_TASK, JSON.stringify({ phoneId: PHONE_ID }));
     }
 }, 5000);
@@ -52,9 +53,8 @@ client.on('connect', () => {
     client.subscribe(`${PREFIX}/task/${PHONE_ID}`); 
     client.subscribe(T_PROCEED);                     
     
-    if (currentTask && !bot) {
-        // Kalo HP restart, coba minta WH lagi
-        log(`Resume task ${currentTask.nickname}`);
+    if (currentTask && !bot && !whDone) {
+        log(`Resume task ${currentTask.nickname}, minta WH ulang`);
         client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
     }
 });
@@ -62,11 +62,11 @@ client.on('connect', () => {
 client.on('message', (topic, msg) => {
     let data; try { data = JSON.parse(msg.toString()); } catch(e) { return; }
 
-    // Terima izin WH
+    // Dapet izin WH dari Master
     if (topic === T_PROCEED && data.action === 'PROCEED') {
         if (currentTask && data.nickname === currentTask.nickname) {
             log(`✅ WH Granted. Connect ke MC!`);
-            whGranted = true;
+            whDone = true;
             connectBot();
         }
     }
@@ -74,19 +74,16 @@ client.on('message', (topic, msg) => {
     // Terima tugas baru
     if (topic === `${PREFIX}/task/${PHONE_ID}`) {
         if (data.action === 'LOGIN') {
-            log(`Dapet tugas: ${data.nickname}`);
+            log(`Dapet tugas baru: ${data.nickname}`);
             saveTask(data);
-            whGranted = false;
-            // Sebenernya Master udah nambahin WH sebelum ngasih ini, 
-            // tapi kita panggil PROCEED manual biar langsung jalan.
-            whGranted = true; 
+            whDone = true; // Master udah pastiin WH
             connectBot();
         }
     }
 });
 
 function connectBot() {
-    if (isConnecting || !currentTask || !whGranted) return;
+    if (isConnecting || !currentTask || !whDone) return;
     isConnecting = true;
     log(`Connecting ke MC...`);
 
@@ -111,7 +108,7 @@ function connectBot() {
         bot = null;
         log(`⚠️ Disconnected: ${reason}. Reconnect...`);
         if (currentTask) {
-            whGranted = false;
+            whDone = false; // Butuh WH ulang
             scheduleReconnect();
         }
     });
@@ -133,7 +130,6 @@ async function runFlow() {
         if (bot.physics && bot.physics.stopListeners) bot.physics.stopListeners();
 
         client.publish(T_STATUS, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname, status: 'in_skyblock' }));
-        
         currentTask.reported = true;
         saveTask(currentTask);
 
@@ -144,7 +140,7 @@ function scheduleReconnect() {
     if (!currentTask) return;
     log(`🔄 Minta WH ulang dalam 15 detik...`);
     setTimeout(() => {
-        if (currentTask) {
+        if (currentTask && !whDone) {
             client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
         }
     }, 15000);
