@@ -2,15 +2,19 @@ const mqtt = require('mqtt');
 const mineflayer = require('mineflayer');
 const fs = require('fs');
 
+// ═══════════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════════
 const MQTT_URL = 'mqtt://broker.hivemq.com:1883';
 const PREFIX = 'farmkalwi_09812'; // SAMAKAN
 const PHONE_ID = 'HP-' + Date.now().toString().slice(-4) + Math.floor(Math.random()*100);
 const TASK_FILE = './current_task.json';
 
 // Topics
-const T_REQ_TASK = `${PREFIX}/agent/request_task`; // Minta tugas ke Master
-const T_PROCEED  = `${PREFIX}/agent/proceed`;      // Izin login dari Master
-const T_STATUS   = `${PREFIX}/agent/status`;       // Lapor status
+const T_REQ_TASK = `${PREFIX}/agent/request_task`; 
+const T_REQ_WH   = `${PREFIX}/agent/request_wh`;   
+const T_PROCEED  = `${PREFIX}/agent/proceed`;      
+const T_STATUS   = `${PREFIX}/agent/status`;       
 
 let bot = null;
 let currentTask = null;
@@ -40,7 +44,6 @@ function saveTask(t) {
 const log = (m) => console.log(`[${new Date().toISOString().slice(11, 19)}] [${PHONE_ID}] ${m}`);
 const client = mqtt.connect(MQTT_URL);
 
-// Loop minta tugas kalau lagi idle
 function askForTask() {
     if (currentTask || !client.connected) return;
     client.publish(T_REQ_TASK, JSON.stringify({ phoneId: PHONE_ID }));
@@ -48,15 +51,13 @@ function askForTask() {
 
 client.on('connect', () => {
     log(`MQTT Terhubung.`);
-    client.subscribe(`${PREFIX}/task/${PHONE_ID}`); // Buat nerima instruksi login
-    client.subscribe(T_PROCEED);                     // Buat nerima izin WH
+    client.subscribe(`${PREFIX}/task/${PHONE_ID}`); 
+    client.subscribe(T_PROCEED);                     
     
     if (currentTask) {
-        // Kalau ada sisa task (misal HP restart), langsung minta WH
         log(`Resume task ${currentTask.nickname}`);
-        client.publish(`${PREFIX}/agent/request_wh`, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
+        client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
     } else {
-        // Kalau kosong, minta tugas baru tiap 5 detik
         setInterval(askForTask, 5000);
     }
 });
@@ -64,7 +65,6 @@ client.on('connect', () => {
 client.on('message', (topic, msg) => {
     let data; try { data = JSON.parse(msg.toString()); } catch(e) { return; }
 
-    // 1. Dapet izin login dari Master (setelah WH sukses)
     if (topic === T_PROCEED && data.action === 'PROCEED') {
         if (currentTask && data.nickname === currentTask.nickname) {
             log(`✅ WH Granted. Connect ke MC!`);
@@ -73,13 +73,12 @@ client.on('message', (topic, msg) => {
         }
     }
 
-    // 2. Dapet instruksi LOGIN dari Master (task baru)
     if (topic === `${PREFIX}/task/${PHONE_ID}`) {
         if (data.action === 'LOGIN') {
             log(`Menerima task baru: ${data.nickname}`);
             saveTask(data);
-            // Minta WH ke Master untuk task ini
-            client.publish(`${PREFIX}/agent/request_wh`, JSON.stringify({ phoneId: PHONE_ID, nickname: data.nickname }));
+            whGranted = false;
+            client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: data.nickname }));
         }
     }
 });
@@ -111,7 +110,7 @@ function connectBot() {
         log(`⚠️ Disconnected: ${reason}. Reconnect...`);
         if (currentTask) {
             whGranted = false;
-            scheduleReconnect(); // Minta WH lagi
+            scheduleReconnect();
         }
     });
 
@@ -133,7 +132,6 @@ async function runFlow() {
 
         client.publish(T_STATUS, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname, status: 'in_skyblock' }));
         
-        // Tandai sukses
         currentTask.reported = true;
         saveTask(currentTask);
 
@@ -145,7 +143,7 @@ function scheduleReconnect() {
     log(`🔄 Reconnect dalam 15 detik...`);
     setTimeout(() => {
         if (currentTask) {
-            client.publish(`${PREFIX}/agent/request_wh`, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
+            client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
         }
     }, 15000);
 }
