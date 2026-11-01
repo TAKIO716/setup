@@ -2,15 +2,11 @@ const mqtt = require('mqtt');
 const mineflayer = require('mineflayer');
 const fs = require('fs');
 
-// ═══════════════════════════════════════════════════════════
-// CONFIG
-// ═══════════════════════════════════════════════════════════
 const MQTT_URL = 'mqtt://broker.hivemq.com:1883';
 const PREFIX = 'farmkalwi_09812'; // SAMAKAN
 const PHONE_ID = 'HP-' + Date.now().toString().slice(-4) + Math.floor(Math.random()*100);
 const TASK_FILE = './current_task.json';
 
-// Topics
 const T_REQ_TASK = `${PREFIX}/agent/request_task`; 
 const T_REQ_WH   = `${PREFIX}/agent/request_wh`;   
 const T_PROCEED  = `${PREFIX}/agent/proceed`;      
@@ -44,27 +40,29 @@ function saveTask(t) {
 const log = (m) => console.log(`[${new Date().toISOString().slice(11, 19)}] [${PHONE_ID}] ${m}`);
 const client = mqtt.connect(MQTT_URL);
 
-function askForTask() {
-    if (currentTask || !client.connected) return;
-    client.publish(T_REQ_TASK, JSON.stringify({ phoneId: PHONE_ID }));
-}
+// Timer minta tugas
+setInterval(() => {
+    if (!currentTask && client.connected) {
+        client.publish(T_REQ_TASK, JSON.stringify({ phoneId: PHONE_ID }));
+    }
+}, 5000);
 
 client.on('connect', () => {
     log(`MQTT Terhubung.`);
     client.subscribe(`${PREFIX}/task/${PHONE_ID}`); 
     client.subscribe(T_PROCEED);                     
     
-    if (currentTask) {
+    if (currentTask && !bot) {
+        // Kalo HP restart, coba minta WH lagi
         log(`Resume task ${currentTask.nickname}`);
         client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
-    } else {
-        setInterval(askForTask, 5000);
     }
 });
 
 client.on('message', (topic, msg) => {
     let data; try { data = JSON.parse(msg.toString()); } catch(e) { return; }
 
+    // Terima izin WH
     if (topic === T_PROCEED && data.action === 'PROCEED') {
         if (currentTask && data.nickname === currentTask.nickname) {
             log(`✅ WH Granted. Connect ke MC!`);
@@ -73,13 +71,16 @@ client.on('message', (topic, msg) => {
         }
     }
 
+    // Terima tugas baru
     if (topic === `${PREFIX}/task/${PHONE_ID}`) {
         if (data.action === 'LOGIN') {
-            log(`Menerima task baru: ${data.nickname}`);
+            log(`Dapet tugas: ${data.nickname}`);
             saveTask(data);
             whGranted = false;
-            // Minta WH ke Master
-            client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: data.nickname }));
+            // Sebenernya Master udah nambahin WH sebelum ngasih ini, 
+            // tapi kita panggil PROCEED manual biar langsung jalan.
+            whGranted = true; 
+            connectBot();
         }
     }
 });
@@ -141,7 +142,7 @@ async function runFlow() {
 
 function scheduleReconnect() {
     if (!currentTask) return;
-    log(`🔄 Reconnect dalam 15 detik...`);
+    log(`🔄 Minta WH ulang dalam 15 detik...`);
     setTimeout(() => {
         if (currentTask) {
             client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
