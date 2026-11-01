@@ -11,12 +11,13 @@ const T_REQ_TASK = `${PREFIX}/agent/request_task`;
 const T_REQ_WH   = `${PREFIX}/agent/request_wh`;   
 const T_PROCEED  = `${PREFIX}/agent/proceed`;      
 const T_STATUS   = `${PREFIX}/agent/status`;       
+const T_FAILED   = `${PREFIX}/agent/failed`;        // BARU
 
 let bot = null;
 let currentTask = null;
 let isConnecting = false;
-let whDone = false; // Flag: udah pernah dapet izin WH
-let lastWhRequest = 0;
+let whDone = false;
+let failCount = 0;
 
 const BOT_CONFIG = {
     host: 'kalwi.id', port: 25565, version: '1.18.1',
@@ -54,7 +55,7 @@ client.on('connect', () => {
     client.subscribe(T_PROCEED);                     
     
     if (currentTask && !bot && !whDone) {
-        log(`Resume task ${currentTask.nickname}, minta WH ulang`);
+        log(`Resume task ${currentTask.nickname}`);
         client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
     }
 });
@@ -62,7 +63,6 @@ client.on('connect', () => {
 client.on('message', (topic, msg) => {
     let data; try { data = JSON.parse(msg.toString()); } catch(e) { return; }
 
-    // Dapet izin WH dari Master
     if (topic === T_PROCEED && data.action === 'PROCEED') {
         if (currentTask && data.nickname === currentTask.nickname) {
             log(`✅ WH Granted. Connect ke MC!`);
@@ -71,12 +71,12 @@ client.on('message', (topic, msg) => {
         }
     }
 
-    // Terima tugas baru
     if (topic === `${PREFIX}/task/${PHONE_ID}`) {
         if (data.action === 'LOGIN') {
             log(`Dapet tugas baru: ${data.nickname}`);
             saveTask(data);
-            whDone = true; // Master udah pastiin WH
+            whDone = true;
+            failCount = 0;
             connectBot();
         }
     }
@@ -85,14 +85,14 @@ client.on('message', (topic, msg) => {
 function connectBot() {
     if (isConnecting || !currentTask || !whDone) return;
     isConnecting = true;
-    log(`Connecting ke MC...`);
+    log(`Connecting ke MC... (fail count: ${failCount})`);
 
     try {
         bot = mineflayer.createBot({ ...BOT_CONFIG, username: currentTask.nickname });
     } catch (err) {
         isConnecting = false;
         log(`❌ Gagal createBot: ${err.message}`);
-        return scheduleReconnect();
+        return handleFailure('createBot error: ' + err.message);
     }
 
     bot.once('spawn', async () => {
@@ -106,14 +106,54 @@ function connectBot() {
     bot.on('end', (reason) => {
         isConnecting = false;
         bot = null;
-        log(`⚠️ Disconnected: ${reason}. Reconnect...`);
+        log(`⚠️ Disconnected: ${reason}`);
         if (currentTask) {
-            whDone = false; // Butuh WH ulang
-            scheduleReconnect();
+            whDone = false;
+            // Kalau putus karena kicked/error, lapor failed
+            if (/error|kick|banned|whitelist/i.test(String(reason))) {
+                handleFailure('disconnect: ' + reason);
+            } else {
+                scheduleReconnect();
+            }
         }
     });
 
-    bot.on('error', (err) => log(`❌ Error: ${err.message}`));
+    bot.on('error', (err) => {
+        log(`❌ Error: ${err.message}`);
+        // Kalau error fatal (ECONNREFUSED, timeout), lapor failed
+        if (/ECONNREFUSED|ETIMEDOUT|timeout/i.test(err.message)) {
+            handleFailure('error: ' + err.message);
+        }
+    });
+
+    bot.on('kicked', (reason) => {
+        let msg = reason; try { msg = JSON.parse(reason).text || reason; } catch {}
+        log(`⚠️ Kicked: ${msg}`);
+        // Kalo kicked karena whitelist, lapor failed
+        if (/whitelist|not registered|tidak terdaftar/i.test(msg)) {
+            handleFailure('kicked: ' + msg);
+        }
+    });
+}
+
+function handleFailure(reason) {
+    failCount++;
+    log(`❌ Failure #${failCount}: ${reason}`);
+    
+    if (currentTask && failCount >= 3) {
+        log(`Report failure ke Master (${currentTask.nickname})`);
+        client.publish(T_FAILED, JSON.stringify({ 
+            phoneId: PHONE_ID, 
+            nickname: currentTask.nickname, 
+            reason 
+        }));
+        // Reset task
+        saveTask(null);
+        whDone = false;
+        failCount = 0;
+    } else {
+        scheduleReconnect();
+    }
 }
 
 async function runFlow() {
@@ -132,8 +172,12 @@ async function runFlow() {
         client.publish(T_STATUS, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname, status: 'in_skyblock' }));
         currentTask.reported = true;
         saveTask(currentTask);
+        failCount = 0;
 
-    } catch (err) { log(`❌ Flow error: ${err.message}`); }
+    } catch (err) { 
+        log(`❌ Flow error: ${err.message}`);
+        handleFailure('flow: ' + err.message);
+    }
 }
 
 function scheduleReconnect() {
