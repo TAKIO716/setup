@@ -1,173 +1,149 @@
-/**
- * AGENT — Kalwi Alt Farm (Termux)
- * Jalankan: node agent.js
- */
 const mqtt = require('mqtt');
 const mineflayer = require('mineflayer');
 const fs = require('fs');
 
-// ═══════════════════════════════════════════════════════════
-// CONFIG (UBAH PREFIX INI SESUAIKAN DENGAN MASTER & TAMPERMONKEY)
-// ═══════════════════════════════════════════════════════════
 const MQTT_URL = 'mqtt://broker.hivemq.com:1883';
-const PREFIX = 'farmkalwi_09812'; // <--- GANTI INI
-const PHONE_ID = 'HP-' + Date.now().toString().slice(-4) + Math.floor(Math.random()*100); 
+const PREFIX = 'farmkalwi_09812'; // SAMAKAN
+const PHONE_ID = 'HP-' + Date.now().toString().slice(-4);
 const TASK_FILE = './current_task.json';
 
-const BOT_CONFIG = {
-    host: 'kalwi.id',
-    port: 25565,
-    version: '1.18.1',
-    auth: 'offline',
-    skipValidation: true,
-    physicsEnabled: false,
-    viewDistance: 'tiny',
-    chat: 'commandsOnly',
-    checkTimeoutInterval: 30000,
-};
-
-const DELAY = {
-    state: 5000,
-    reconnect: 15000,
-};
+// Topics
+const T_REQ_WH   = `${PREFIX}/agent/request_wh`;
+const T_PROCEED  = `${PREFIX}/agent/proceed`;
+const T_STATUS   = `${PREFIX}/agent/status`;
 
 let bot = null;
 let currentTask = null;
 let isConnecting = false;
+let whGranted = false; // Flag: Apakah Master udah kasih izin?
+
+const BOT_CONFIG = {
+    host: 'kalwi.id', port: 25565, version: '1.18.1',
+    auth: 'offline', skipValidation: true, physicsEnabled: false,
+    viewDistance: 'tiny', chat: 'commandsOnly'
+};
 
 function loadTask() {
     try {
         if (fs.existsSync(TASK_FILE)) {
-            currentTask = JSON.parse(fs.readFileSync(TASK_FILE, 'utf8'));
-            console.log(`[AGENT] Resume task sebelumnya: ${currentTask.nickname}`);
+            const c = fs.readFileSync(TASK_FILE, 'utf8');
+            if (c && c.trim() !== '') currentTask = JSON.parse(c);
         }
-    } catch(e) {}
+    } catch(e) { try { fs.unlinkSync(TASK_FILE); } catch(err){} }
 }
-
-function saveTask(task) {
-    currentTask = task;
-    if (task) fs.writeFileSync(TASK_FILE, JSON.stringify(task));
+function saveTask(t) {
+    currentTask = t;
+    if (t) fs.writeFileSync(TASK_FILE, JSON.stringify(t));
     else if (fs.existsSync(TASK_FILE)) fs.unlinkSync(TASK_FILE);
 }
 
-const ts = () => new Date().toISOString().slice(11, 19);
-const log = (msg) => console.log(`[${ts()}] [${PHONE_ID}] ${msg}`);
-
-log(`Starting Agent. Connecting to MQTT...`);
+const log = (m) => console.log(`[${new Date().toISOString().slice(11, 19)}] [${PHONE_ID}] ${m}`);
 const client = mqtt.connect(MQTT_URL);
 
 client.on('connect', () => {
     log(`MQTT Terhubung.`);
-    client.subscribe(`${PREFIX}/task/${PHONE_ID}`);
+    client.subscribe(`${PREFIX}/task/${PHONE_ID}`); // Task dari Tampermonkey/Cron
+    client.subscribe(T_PROCEED); // Izin login dari Master
     
-    if (!currentTask) {
-        client.publish(`${PREFIX}/request`, JSON.stringify({ phoneId: PHONE_ID }));
-    } else if (!bot && !isConnecting) {
-        connectBot();
+    // Mulai flow
+    if (currentTask) {
+        requestWH();
+    } else {
+        log(`Nunggu tugas...`);
     }
 });
 
-client.on('message', (topic, msg) => {
-    if (topic === `${PREFIX}/task/${PHONE_ID}`) {
-        let data;
-        try { data = JSON.parse(msg.toString()); } catch(e) { return; }
-        
-        if (data.action === 'STANDBY') return;
+// Fungsi minta WH ke Master
+function requestWH() {
+    if (!currentTask) return;
+    whGranted = false;
+    log(`Minta izin WH untuk: ${currentTask.nickname}`);
+    client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname }));
+}
 
-        if (data.action === 'LOGIN') {
-            if (currentTask && currentTask.nickname === data.nickname && bot) return;
-            
-            log(`Menerima tugas: ${data.nickname}`);
-            saveTask(data);
-            
-            if (bot) { try { bot.quit(); } catch(e){} bot = null; }
+client.on('message', (topic, msg) => {
+    let data; try { data = JSON.parse(msg.toString()); } catch(e) { return; }
+
+    // Dapet izin dari Master
+    if (topic === T_PROCEED && data.action === 'PROCEED') {
+        if (currentTask && data.nickname === currentTask.nickname) {
+            log(`✅ WH Granted. Lanjut connect ke MC!`);
+            whGranted = true;
             connectBot();
+        }
+    }
+
+    // Terima tugas baru (biasanya dari lu manual / webhook)
+    if (topic === `${PREFIX}/task/${PHONE_ID}`) {
+        if (data.action === 'LOGIN') {
+            saveTask(data);
+            requestWH(); // Langsung minta WH
         }
     }
 });
 
 function connectBot() {
-    if (isConnecting || !currentTask) return;
+    if (isConnecting || !currentTask || !whGranted) return;
     isConnecting = true;
-
-    log(`Connecting ke Minecraft sebagai ${currentTask.nickname}...`);
+    log(`Connecting ke MC...`);
 
     try {
         bot = mineflayer.createBot({ ...BOT_CONFIG, username: currentTask.nickname });
     } catch (err) {
-        log(`❌ Create bot gagal: ${err.message}`);
         isConnecting = false;
-        scheduleReconnect();
-        return;
+        log(`❌ Gagal createBot: ${err.message}`);
+        return scheduleReconnect();
     }
 
     bot.once('spawn', async () => {
         isConnecting = false;
-        log(`✅ Spawned. Menjalankan Flow Login & Move...`);
+        log(`✅ Spawned. Login & Move...`);
         await runFlow();
     });
 
-    bot.on('death', () => {
-        log(`💀 Bot mati! Auto respawn...`);
-        try { if (bot) bot.respawn(); } catch(e){}
-    });
+    bot.on('death', () => { if(bot) bot.respawn(); });
 
     bot.on('end', (reason) => {
         isConnecting = false;
         bot = null;
-        log(`⚠️ Disconnected: ${reason || 'unknown'}`);
-        if (currentTask) scheduleReconnect();
+        log(`⚠️ Disconnected: ${reason}. Reconnect...`);
+        if (currentTask) {
+            whGranted = false;
+            scheduleReconnect(); // Minta WH LAGI
+        }
     });
 
     bot.on('error', (err) => log(`❌ Error: ${err.message}`));
-    bot.on('kicked', (reason) => {
-        let msg = reason;
-        try { msg = JSON.parse(reason).text || reason; } catch {}
-        log(`⚠️ Kicked: ${msg}`);
-    });
 }
 
 async function runFlow() {
     try {
-        log(`→ /login ${'*'.repeat(currentTask.password.length)}`);
         bot.chat(`/login ${currentTask.password}`);
-        await new Promise(r => setTimeout(r, DELAY.state));
-        
+        await new Promise(r => setTimeout(r, 5000));
         if (!bot || !bot.entity) return;
 
-        log(`→ /move skyblock`);
         bot.chat('/move skyblock');
-        await new Promise(r => setTimeout(r, DELAY.state));
-        
+        await new Promise(r => setTimeout(r, 5000));
         if (!bot || !bot.entity) return;
 
-        log(`✅ Bot di Skyblock. AFK Render Chunk Aktif.`);
-        
+        log(`✅ Masuk Skyblock!`);
         if (bot.physics && bot.physics.stopListeners) bot.physics.stopListeners();
 
-        if (!currentTask.reported) {
-            client.publish(`${PREFIX}/status`, JSON.stringify({ 
-                phoneId: PHONE_ID, nickname: currentTask.nickname, status: 'success' 
-            }));
-            currentTask.reported = true;
-            saveTask(currentTask);
-        }
+        // Lapor Master
+        client.publish(T_STATUS, JSON.stringify({ phoneId: PHONE_ID, nickname: currentTask.nickname, status: 'in_skyblock' }));
+        
+        // Tandai sukses (biar gak spam lapor)
+        currentTask.reported = true;
+        saveTask(currentTask);
 
-    } catch (err) {
-        log(`❌ Flow error: ${err.message}`);
-    }
+    } catch (err) { log(`❌ Flow error: ${err.message}`); }
 }
 
 function scheduleReconnect() {
     if (!currentTask) return;
-    log(`🔄 Reconnect dalam ${DELAY.reconnect / 1000} detik...`);
-    setTimeout(() => { if (currentTask) connectBot(); }, DELAY.reconnect);
+    log(`🔄 Reconnect dalam 15 detik...`);
+    setTimeout(() => { requestWH(); }, 15000); // Minta WH lagi sebelum connect
 }
 
 loadTask();
-
-process.on('SIGINT', () => {
-    log('Shutting down agent...');
-    if (bot) { try { bot.quit(); } catch {} }
-    process.exit(0);
-});
+process.on('SIGINT', () => { if (bot) bot.quit(); process.exit(0); });
