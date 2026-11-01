@@ -78,6 +78,7 @@ client.on('message', (topic, msg) => {
             log(`Menerima task baru: ${data.nickname}`);
             saveTask(data);
             whGranted = false;
+            // Minta WH ke Master
             client.publish(T_REQ_WH, JSON.stringify({ phoneId: PHONE_ID, nickname: data.nickname }));
         }
     }
