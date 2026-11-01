@@ -7,9 +7,12 @@ NC='\033[0m'
 
 echo -e "${CYAN}=== Auto-Install Kalwi Agent ===${NC}"
 
-# 1. Update & Upgrade Termux
+# 1. Update & Upgrade Termux (Anti-Prompt Conffile)
 echo -e "${GREEN}[1/5] Updating packages...${NC}"
-pkg update -y && pkg upgrade -y
+# Pakai DEBIAN_FRONTEND biar gak ada prompt interaktif
+export DEBIAN_FRONTEND=noninteractive
+pkg update -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+pkg upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
 # 2. Install Dependencies
 echo -e "${GREEN}[2/5] Installing Node.js, NPM, Wget...${NC}"
