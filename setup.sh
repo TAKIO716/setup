@@ -18,7 +18,7 @@ pkg install -y nodejs npm wget
 # 3. Download agent.js dari GitHub
 # GANTI URL DI BAWAH DENGAN URL RAW GITHUB LO
 echo -e "${GREEN}[3/5] Downloading agent.js...${NC}"
-AGENT_URL="https://raw.githubusercontent.com/USERNAME/REPO/main/agent.js"
+AGENT_URL="https://raw.githubusercontent.com/TAKIO716/setup/refs/heads/main/agent.js"
 wget -qO agent.js "$AGENT_URL"
 
 if [ ! -f "agent.js" ]; then
